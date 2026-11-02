@@ -1,3 +1,51 @@
+
+// Helper Engine: Process Daily Punch Logs with Chronological Short Break Deductions
+function processDailyPunchLogs(punchesMap) {
+  for (let dKey in punchesMap) {
+    let dayData = punchesMap[dKey];
+    if (!dayData.rawLogs || dayData.rawLogs.length === 0) continue;
+    
+    dayData.rawLogs.sort((a, b) => a.time.getTime() - b.time.getTime());
+    
+    let punchIn = null;
+    let punchOut = null;
+    let isHalfDay = false;
+    let totalBreakMs = 0;
+    let breakStart = null;
+    
+    for (let k = 0; k < dayData.rawLogs.length; k++) {
+      let item = dayData.rawLogs[k];
+      let t = item.type ? item.type.toString().trim() : "";
+      let tUpper = t.toUpperCase();
+      
+      if (tUpper === "HALF DAY") {
+        isHalfDay = true;
+      } else if (tUpper === "PUNCH IN") {
+        if (!punchIn) punchIn = item.time;
+      } else if (tUpper === "PUNCH OUT") {
+        punchOut = item.time;
+        if (breakStart) {
+          totalBreakMs += Math.max(0, item.time.getTime() - breakStart.getTime());
+          breakStart = null;
+        }
+      } else if (tUpper.includes("BREAK") && (tUpper.includes("OUT") || tUpper.includes("JATE"))) {
+        breakStart = item.time;
+      } else if (tUpper.includes("BREAK") && (tUpper.includes("IN") || tUpper.includes("AATE"))) {
+        if (breakStart) {
+          totalBreakMs += Math.max(0, item.time.getTime() - breakStart.getTime());
+          breakStart = null;
+        }
+      }
+    }
+    
+    dayData.in = punchIn;
+    dayData.out = punchOut;
+    dayData.type = isHalfDay ? "Half Day" : null;
+    dayData.totalBreakHours = totalBreakMs / 3600000;
+    dayData.totalBreakMinutes = Math.round(totalBreakMs / 60000);
+  }
+}
+
 // ====================================================================================
 // YASH MARKETING OS - MASTER SYSTEM CODE (UPDATED WITH ADVANCE PENALTY & LOGS MODULE)
 // ====================================================================================
@@ -80,10 +128,16 @@ function evaluateEmployeeMonth(empObj, empPunchesMap, daysInMonth, evalBoundary,
                     if (d <= evalBoundary) {
                         metrics.present++;
                         metrics.paidDays++;
-                        let exactHrs = (new Date(pData.out).getTime() - new Date(pData.in).getTime()) / 3600000;
-                        if (exactHrs > 0) { metrics.totalExactHours += exactHrs; dayHrs = exactHrs; }
+                        let grossHrs = (new Date(pData.out).getTime() - new Date(pData.in).getTime()) / 3600000;
+                        let netHrs = Math.max(0, grossHrs - (pData.totalBreakHours || 0));
+                        metrics.totalExactHours += netHrs;
+                        dayHrs = netHrs;
                     }
-                    dayStatus = "Present";
+                    if (pData.totalBreakMinutes > 0) {
+                        dayStatus = `Present (${pData.totalBreakMinutes}m Break)`;
+                    } else {
+                        dayStatus = "Present";
+                    }
                 } else if (pData.in && !pData.out) {
                     metrics.missedOuts++;
                     dayIn = new Date(pData.in).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
@@ -91,15 +145,22 @@ function evaluateEmployeeMonth(empObj, empPunchesMap, daysInMonth, evalBoundary,
                         if (isPenaltyActive && (metrics.missedOuts % 3 === 0)) {
                             metrics.halfDays++;
                             metrics.paidDays += 0.5;
-                            metrics.totalExactHours += (empObj.shiftHours / 2);
-                            dayHrs = empObj.shiftHours / 2;
+                            let halfShift = (empObj.shiftHours / 2);
+                            let netHrs = Math.max(0, halfShift - (pData.totalBreakHours || 0));
+                            metrics.totalExactHours += netHrs;
+                            dayHrs = netHrs;
                             dayStatus = "Penalty Half Day (Missed Out)";
                         } else {
                             metrics.present++;
                             metrics.paidDays++;
-                            metrics.totalExactHours += empObj.shiftHours;
-                            dayHrs = empObj.shiftHours;
-                            dayStatus = "Missed Punch Out";
+                            let netHrs = Math.max(0, empObj.shiftHours - (pData.totalBreakHours || 0));
+                            metrics.totalExactHours += netHrs;
+                            dayHrs = netHrs;
+                            if (pData.totalBreakMinutes > 0) {
+                                dayStatus = `Missed Punch Out (${pData.totalBreakMinutes}m Break)`;
+                            } else {
+                                dayStatus = "Missed Punch Out";
+                            }
                         }
                     } else {
                         dayStatus = "Missed Punch Out";
@@ -129,7 +190,7 @@ function evaluateEmployeeMonth(empObj, empPunchesMap, daysInMonth, evalBoundary,
         
         metrics.attendanceMap[dKey] = dayStatus;
         if (d <= evalBoundary) {
-            metrics.dailyLogs.push({ date: dKey, status: dayStatus, in: dayIn, out: dayOut, hrs: typeof dayHrs === 'number' ? dayHrs.toFixed(2) : dayHrs });
+            metrics.dailyLogs.push({ date: dKey, status: dayStatus, in: dayIn, out: dayOut, breakMins: pData ? (pData.totalBreakMinutes || 0) : 0, hrs: typeof dayHrs === 'number' ? dayHrs.toFixed(2) : dayHrs });
         }
     }
     return metrics;
@@ -259,13 +320,12 @@ function authenticateUser(empId, pass, targetMonthStr) {
           let dateStr = `${logDateObj.getFullYear()}-${String(logDateObj.getMonth() + 1).padStart(2, '0')}-${String(logDateObj.getDate()).padStart(2, '0')}`;
           let logType = allLogs[i][logTypeCol] ? allLogs[i][logTypeCol].toString().trim() : "Punch In";
           
-          if(!userPunchesMap[dateStr]) userPunchesMap[dateStr] = { in: null, out: null, type: null };
-          if (logType === "Half Day") userPunchesMap[dateStr].type = "Half Day";
-          else if (logType === "Punch In") { if (!userPunchesMap[dateStr].in || logDateObj < userPunchesMap[dateStr].in) userPunchesMap[dateStr].in = logDateObj; } 
-          else if (logType === "Punch Out") { if (!userPunchesMap[dateStr].out || logDateObj > userPunchesMap[dateStr].out) userPunchesMap[dateStr].out = logDateObj; }
+          if(!userPunchesMap[dateStr]) userPunchesMap[dateStr] = { in: null, out: null, type: null, rawLogs: [] };
+          userPunchesMap[dateStr].rawLogs.push({ time: logDateObj, type: logType });
         }
       }
     }
+    processDailyPunchLogs(userPunchesMap);
 
     // Call unified engine for standard user calculation
     let userMetrics = evaluateEmployeeMonth(user, userPunchesMap, totalDaysInTargetMonth, evaluationDaysBoundary, filterYear, filterMonth, globalLeaveDataAll, isPenaltyActive);
@@ -317,13 +377,12 @@ function authenticateUser(empId, pass, targetMonthStr) {
               let dKey = `${lDateObj.getFullYear()}-${String(lDateObj.getMonth() + 1).padStart(2, '0')}-${String(lDateObj.getDate()).padStart(2, '0')}`;
               let lType = allLogs[j][logTypeCol] ? allLogs[j][logTypeCol].toString().trim() : "Punch In";
               
-              if(!staffPunches[dKey]) staffPunches[dKey] = { in: null, out: null, type: null };
-              if (lType === "Half Day") staffPunches[dKey].type = "Half Day";
-              else if (lType === "Punch In") { if (!staffPunches[dKey].in || lDateObj < staffPunches[dKey].in) staffPunches[dKey].in = lDateObj; } 
-              else if (lType === "Punch Out") { if (!staffPunches[dKey].out || lDateObj > staffPunches[dKey].out) staffPunches[dKey].out = lDateObj; }
+              if(!staffPunches[dKey]) staffPunches[dKey] = { in: null, out: null, type: null, rawLogs: [] };
+              staffPunches[dKey].rawLogs.push({ time: lDateObj, type: lType });
             }
           }
         }
+        processDailyPunchLogs(staffPunches);
 
         // Call unified engine for Admin grid matrix
         let staffMetrics = evaluateEmployeeMonth(staffObj, staffPunches, totalDaysInTargetMonth, evaluationDaysBoundary, filterYear, filterMonth, globalLeaveDataAll, isPenaltyActive);
@@ -452,7 +511,18 @@ function processPunch(empId, type, location, imgBase64) {
     if(hasEmpNameCol) { sheet.appendRow([new Date(), empName, empId, type, location, imageUrl]); } 
     else { sheet.appendRow([new Date(), empId, type, location, imageUrl]); }
     
-    return `Success: Registered ${type} status log onto system arrays.`;
+        let timeStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "hh:mm a");
+    if (type === "Short Break (Out)") {
+      return `? Short Break Punch Out recorded at ${timeStr}. Break duration working hours se cut hoga.`;
+    } else if (type === "Short Break (In)") {
+      return `?? Short Break Punch In recorded at ${timeStr}. Welcome back! Working hours resumed.`;
+    } else if (type === "Punch In") {
+      return `? Shift Start (Punch In) successfully registered at ${timeStr}!`;
+    } else if (type === "Punch Out") {
+      return `?? Shift End (Punch Out) successfully registered at ${timeStr}!`;
+    } else {
+      return `Success: Registered ${type} status log onto system arrays.`;
+    }
   } catch(e) { return "Ledger Exception: " + e.message; }
 }
 

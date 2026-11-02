@@ -107,7 +107,7 @@
         <div class="table-responsive-wrapper">
             <table class="payroll-table">
                 <thead>
-                    <tr><th>Date</th><th>Status</th><th>In</th><th>Out</th><th>Hrs</th></tr>
+                    <tr><th>Date</th><th>Status</th><th>In</th><th>Out</th><th>Break</th><th>Net Hrs</th></tr>
                 </thead>
                 <tbody id="ledgerModalTbody">
                 </tbody>
@@ -188,11 +188,18 @@
   <div id="punchView" class="container">
     <h2>Attendance Action</h2>
     <p style="margin-bottom: 20px;">Identity verification snapshot mandatory.</p>
-    <select id="attendanceLogType">
-      <option value="Punch In">Punch In (Shift Start)</option>
-      <option value="Punch Out">Punch Out (Shift End)</option>
-      <option value="Half Day">Half Day Log</option>
+    <select id="attendanceLogType" onchange="handlePunchTypeChange()">
+      <option value="Punch In">?? Punch In (Shift Start)</option>
+      <option value="Punch Out">?? Punch Out (Shift End)</option>
+      <option value="Short Break (Out)">? Short Break - Jate Time (Punch Out)</option>
+      <option value="Short Break (In)">?? Short Break - Aate Time (Punch In)</option>
+      <option value="Half Day">?? Half Day Log</option>
     </select>
+    <div id="shortBreakHint" style="display:none; background:#eff6ff; border:1px solid #bfdbfe; padding:10px 12px; border-radius:10px; margin: 10px 0; text-align:left;">
+      <p style="font-size:12px; color:#1e40af; margin:0; line-height:1.5; font-weight:500;">
+        ? <b>Short Break Policy:</b> Office se kisi kaam se bahar jate waqt <b>Short Break (Punch Out)</b> aur wapas aane par <b>Short Break (Punch In)</b> karein. Office ke <b>50m radius</b> ke andar se hi punch valid hoga, aur total break time net working hours me se deduct ho jayega.
+      </p>
+    </div>
     
     <button id="btnVerifyGPS" class="btn" onclick="initiateGeofenceVerification()">1. Verify GPS Location</button>
     
@@ -343,12 +350,14 @@
               trBg = "background:#f0fdf4;"; statusColor = "var(--success)";
             }
 
+            let breakDisplay = (l.breakMins && l.breakMins > 0) ? `<span style="color:var(--warning); font-weight:700;">-${l.breakMins}m</span>` : `<span style="color:var(--text-light);">-</span>`;
             let row = `<tr style="${trBg}">
                 <td style="font-size:11px;">${l.date}</td>
                 <td style="font-size:11px; font-weight:600; color:${statusColor}">${l.status}</td>
                 <td style="font-size:11px;">${l.in}</td>
                 <td style="font-size:11px;">${l.out}</td>
-                <td style="font-size:12px; font-weight:700;">${l.hrs}</td>
+                <td style="font-size:11px; text-align:center;">${breakDisplay}</td>
+                <td style="font-size:12px; font-weight:700;">${l.hrs}h</td>
             </tr>`;
             tbody.insertAdjacentHTML('beforeend', row);
         });
@@ -357,6 +366,14 @@
 
     function triggerMonthFilterRefresh() {
       if(currentEmpId) { executeAuthentication(true); }
+    }
+
+    function handlePunchTypeChange() {
+      const type = document.getElementById('attendanceLogType').value;
+      const hint = document.getElementById('shortBreakHint');
+      if (hint) {
+        hint.style.display = type.includes("Break") ? "block" : "none";
+      }
     }
 
     function cancelPunch() {
@@ -622,20 +639,29 @@
                     Math.sin(dLon/2) * Math.sin(dLon/2);
           const computedRadialDistanceMeters = EARTH_RADIUS * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
           
+          const selectedType = document.getElementById('attendanceLogType').value;
+          const isBreakPunch = selectedType.includes("Break");
+          
           let roamingRoleUpper = (currentUserRole || "").toString().trim().toUpperCase();
-          if (roamingRoleUpper === "OWNER" || roamingRoleUpper === "CEO" || roamingRoleUpper === "SALES BOY") {
+          let isRoamingEligible = (roamingRoleUpper === "OWNER" || roamingRoleUpper === "CEO" || roamingRoleUpper === "SALES BOY");
+          
+          if (isRoamingEligible && !isBreakPunch) {
             consoleMsg.style.color = "var(--success)"; 
             consoleMsg.innerText = `Roaming Verification Active (${currentUserRole}). Tap below to open camera.`;
             document.getElementById('btnVerifyGPS').style.display = 'none';
             document.getElementById('btnOpenCamera').style.display = 'block';
           } else if (computedRadialDistanceMeters <= GEOFENCE_RADIUS_METERS) {
             consoleMsg.style.color = "var(--success)"; 
-            consoleMsg.innerText = `GPS Perimeter Match (${Math.round(computedRadialDistanceMeters)}m). Tap below to open camera.`;
+            consoleMsg.innerText = `GPS Perimeter Match (${Math.round(computedRadialDistanceMeters)}m <= 50m). Tap below to open camera.`;
             document.getElementById('btnVerifyGPS').style.display = 'none';
             document.getElementById('btnOpenCamera').style.display = 'block';
           } else {
             consoleMsg.style.color = "var(--danger)"; 
-            consoleMsg.innerText = `Access Denied: Geofence perimeter breach (${Math.round(computedRadialDistanceMeters)}m distance offset from warehouse).`;
+            if (isBreakPunch) {
+              consoleMsg.innerText = `Access Denied: Short Break punch sirf office ke 50m radius ke andar se hi allow hai (${Math.round(computedRadialDistanceMeters)}m door hain).`;
+            } else {
+              consoleMsg.innerText = `Access Denied: Geofence perimeter breach (${Math.round(computedRadialDistanceMeters)}m distance offset from office).`;
+            }
           }
         },
         function(err) { 
